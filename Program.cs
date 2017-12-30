@@ -85,7 +85,6 @@ namespace FileScan
                 var buf2 = new byte[65536];
 
                 Task<byte[]> hashTask = Task.FromResult(buf2);
-                var lockObject = new object();
 
                 foreach (var name in fileEntries)
                 {
@@ -139,7 +138,7 @@ namespace FileScan
                             CreationTimeUtc = fileInfo.CreationTimeUtc,
                             ModificationTimeUtc = fileInfo.LastWriteTimeUtc,
                             Length = fileInfo.Length,
-                            Sha512 = BitConverter.ToString(hash).Replace("-", string.Empty)
+                            Sha512 = BitConverter.ToString(hash).Replace("-", string.Empty).ToLowerInvariant()
                         });
                         ++processed;
                     }
