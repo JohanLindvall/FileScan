@@ -1,4 +1,5 @@
 ﻿using System.Linq;
+using System.Threading.Tasks;
 using OpenSSL.Crypto;
 
 namespace FileScan
@@ -14,7 +15,7 @@ namespace FileScan
     {
         private const string LongPrefix = @"\\?\";
 
-        static void Main(string[] args)
+        static async Task Main(string[] args)
         {
             foreach (var arg in args)
             {
@@ -81,6 +82,10 @@ namespace FileScan
                 fileEntries.Sort();
 
                 var buf = new byte[65536];
+                var buf2 = new byte[65536];
+
+                Task<byte[]> hashTask = Task.FromResult(buf2);
+                var lockObject = new object();
 
                 foreach (var name in fileEntries)
                 {
@@ -102,17 +107,26 @@ namespace FileScan
                         using (var ctx = new MessageDigestContext(MessageDigest.SHA512))
                         {
                             ctx.Init();
+                            var currentBuf = buf;
+
                             while (true)
                             {
-                                var localRead = fi.Read(buf, 0, buf.Length);
+                                var localRead = fi.Read(currentBuf, 0, currentBuf.Length);
+                                var nextBuf = await hashTask;
                                 if (localRead == 0)
                                 {
                                     break;
                                 }
 
-                                ctx.Update(localRead == buf.Length ? buf : buf.Take(localRead).ToArray());
-                                bytes += localRead;
-                                UpdateTitle(name);
+                                var localBuf = currentBuf;
+                                currentBuf = nextBuf;
+                                hashTask = Task.Factory.StartNew(() =>
+                                {
+                                    ctx.Update(localRead == localBuf.Length ? localBuf : localBuf.Take(localRead).ToArray());
+                                    bytes += localRead;
+                                    UpdateTitle(name);
+                                    return localBuf;
+                                });
                             }
 
                             hash = ctx.DigestFinal();
