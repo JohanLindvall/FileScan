@@ -1,4 +1,7 @@
-﻿namespace FileScan
+﻿using System.Linq;
+using OpenSSL.Crypto;
+
+namespace FileScan
 {
     using System;
     using System.Collections.Generic;
@@ -16,14 +19,21 @@
             foreach (var arg in args)
             {
                 var serialised = new List<Entry>();
-                var entries = new Queue<string>();
-                entries.Enqueue(LongPrefix + arg);
+                var directoryEntries = new Queue<string>();
+                var fileEntries = new List<string>();
+                directoryEntries.Enqueue(LongPrefix + arg);
                 var sw = new Stopwatch();
                 sw.Start();
                 long last = 0;
+                long lastWrite = 0;
                 long lastBytes = 0;
                 long bytes = 0;
                 long processed = 0;
+
+                void WriteJson()
+                {
+                    File.WriteAllText(Path.Combine(arg, "FileScan.json"), JsonConvert.SerializeObject(serialised, Formatting.Indented));
+                }
 
                 void UpdateTitle(string current)
                 {
@@ -32,56 +42,96 @@
                     if (elapsed > 1000)
                     {
                         var bps = (double)(bytes - lastBytes) * 1000 / elapsed;
-                        Console.WriteLine($@"{GetBytesReadable((long)bps)}/s {GetBytesReadable(bytes)} {processed}/{entries.Count} {current.Substring(LongPrefix.Length)}");
+                        Console.WriteLine($@"{GetBytesReadable((long)bps)}/s {GetBytesReadable(bytes)} {processed}/{fileEntries.Count - processed}/{directoryEntries.Count} {current.Substring(LongPrefix.Length)}");
                         last = now;
                         lastBytes = bytes;
                     }
+
+                    var elapsedWrite = now - lastWrite;
+                    if (elapsedWrite > 3600000)
+                    {
+                        WriteJson();
+                        lastWrite = now;
+                    }
                 }
 
-                while (entries.Count > 0)
+                while (directoryEntries.Count > 0)
                 {
-                    var name = entries.Dequeue();
+                    var name = directoryEntries.Dequeue();
                     UpdateTitle(name);
-                    if (File.Exists(name))
+                    try
                     {
-                        using (var fi = File.OpenRead(name))
+                        foreach (var file in Directory.GetFileSystemEntries(name))
                         {
-                            using (var progress = new ProgressStream(fi, localBytes =>
+                            if (File.Exists(file))
                             {
-                                bytes += localBytes;
-                                UpdateTitle(name);
-                            }))
+                                fileEntries.Add(file);
+                            }
+                            else
                             {
-                                var hash = new SHA256Managed().ComputeHash(progress);
-                                var fileInfo = new FileInfo(name);
-                                serialised.Add(new Entry
-                                {
-                                    Name = name.Substring(LongPrefix.Length),
-                                    CreationTimeUtc = fileInfo.CreationTimeUtc,
-                                    ModificationTimeUtc = fileInfo.LastWriteTimeUtc,
-                                    Length = fileInfo.Length,
-                                    Sha256 = Convert.ToBase64String(hash)
-                                });
-                                ++processed;
+                                directoryEntries.Enqueue(file);
                             }
                         }
                     }
-                    else
+                    catch (UnauthorizedAccessException)
                     {
-                        try
-                        {
-                            foreach (var file in Directory.GetFileSystemEntries(name))
-                            {
-                                entries.Enqueue(file);
-                            }
-                        }
-                        catch (UnauthorizedAccessException)
-                        {
-                        }
                     }
                 }
 
-                File.WriteAllText(Path.Combine(arg, "FileScan.json"), JsonConvert.SerializeObject(serialised, Formatting.Indented));
+                fileEntries.Sort();
+
+                var buf = new byte[65536];
+
+                foreach (var name in fileEntries)
+                {
+                    UpdateTitle(name);
+
+                    Stream fi;
+
+                    try
+                    {
+                        fi = File.OpenRead(name);
+                    }
+                    catch (IOException)
+                    {
+                        continue;
+                    }
+                    using (fi)
+                    {
+                        byte[] hash = null;
+                        using (var ctx = new MessageDigestContext(MessageDigest.SHA512))
+                        {
+                            ctx.Init();
+                            while (true)
+                            {
+                                var localRead = fi.Read(buf, 0, buf.Length);
+                                if (localRead == 0)
+                                {
+                                    break;
+                                }
+
+                                ctx.Update(localRead == buf.Length ? buf : buf.Take(localRead).ToArray());
+                                bytes += localRead;
+                                UpdateTitle(name);
+                            }
+
+                            hash = ctx.DigestFinal();
+                        }
+
+                        var fileInfo = new FileInfo(name);
+                        serialised.Add(new Entry
+                        {
+                            Name = name.Substring(LongPrefix.Length),
+                            CreationTimeUtc = fileInfo.CreationTimeUtc,
+                            ModificationTimeUtc = fileInfo.LastWriteTimeUtc,
+                            Length = fileInfo.Length,
+                            Sha512 = BitConverter.ToString(hash).Replace("-", string.Empty)
+                        });
+                        ++processed;
+                    }
+                }
+
+                WriteJson();
             }
         }
 
@@ -96,57 +146,7 @@
             public DateTime ModificationTimeUtc { get; set; }
 
 
-            public string Sha256 { get; set; }
-        }
-
-        public class ProgressStream : Stream
-        {
-            private readonly Stream underlyingStream;
-
-            private readonly Action<int> progress;
-
-            public ProgressStream(Stream underlyingStream, Action<int> progress)
-            {
-                this.underlyingStream = underlyingStream;
-                this.progress = progress;
-            }
-
-            public override void Flush()
-            {
-                throw new NotImplementedException();
-            }
-
-            public override long Seek(long offset, SeekOrigin origin)
-            {
-                throw new NotImplementedException();
-            }
-
-            public override void SetLength(long value)
-            {
-                throw new NotImplementedException();
-            }
-
-            public override int Read(byte[] buffer, int offset, int count)
-            {
-                var result = this.underlyingStream.Read(buffer, offset, count);
-                this.progress(result);
-                return result;
-            }
-
-            public override void Write(byte[] buffer, int offset, int count)
-            {
-                throw new NotImplementedException();
-            }
-
-            public override bool CanRead { get; }
-
-            public override bool CanSeek { get; }
-
-            public override bool CanWrite { get; }
-
-            public override long Length { get; }
-
-            public override long Position { get; set; }
+            public string Sha512 { get; set; }
         }
 
         // http://www.somacon.com/p576.php
