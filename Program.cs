@@ -1,15 +1,14 @@
-﻿using System.Linq;
-using System.Threading.Tasks;
-using OpenSSL.Crypto;
-
-namespace FileScan
+﻿namespace FileScan
 {
+    using Newtonsoft.Json;
+    using OpenSSL.Crypto;
     using System;
     using System.Collections.Generic;
     using System.Diagnostics;
+    using System.Globalization;
     using System.IO;
-    using System.Security.Cryptography;
-    using Newtonsoft.Json;
+    using System.Linq;
+    using System.Threading.Tasks;
 
     class Program
     {
@@ -19,6 +18,7 @@ namespace FileScan
         {
             foreach (var arg in args)
             {
+                var fileScanJson = LongPrefix + Path.Combine(arg, "FileScan.json");
                 var serialised = new List<Entry>();
                 var directoryEntries = new Queue<string>();
                 var fileEntries = new List<string>();
@@ -33,7 +33,7 @@ namespace FileScan
 
                 void WriteJson()
                 {
-                    File.WriteAllText(Path.Combine(arg, "FileScan.json"), JsonConvert.SerializeObject(serialised, Formatting.Indented));
+                    File.WriteAllText(fileScanJson, JsonConvert.SerializeObject(serialised, Formatting.Indented));
                 }
 
                 void UpdateTitle(string current)
@@ -56,6 +56,13 @@ namespace FileScan
                     }
                 }
 
+                var existingFiles = new Dictionary<string, Entry>(StringComparer.InvariantCultureIgnoreCase);
+
+                if (File.Exists(fileScanJson))
+                {
+                    existingFiles = JsonConvert.DeserializeObject<Entry[]>(File.ReadAllText(fileScanJson)).ToDictionary(item => item.Name, item => item);
+                }
+
                 while (directoryEntries.Count > 0)
                 {
                     var name = directoryEntries.Dequeue();
@@ -66,7 +73,10 @@ namespace FileScan
                         {
                             if (File.Exists(file))
                             {
-                                fileEntries.Add(file);
+                                if (!string.Equals(fileScanJson, file, StringComparison.InvariantCultureIgnoreCase))
+                                {
+                                    fileEntries.Add(file);
+                                }
                             }
                             else
                             {
@@ -79,69 +89,88 @@ namespace FileScan
                     }
                 }
 
-                fileEntries.Sort();
+                fileEntries.Sort(StringComparer.InvariantCultureIgnoreCase);
 
                 var buf = new byte[65536];
                 var buf2 = new byte[65536];
 
-                Task<byte[]> hashTask = Task.FromResult(buf2);
+                var hashTask = Task.FromResult(buf2);
 
                 foreach (var name in fileEntries)
                 {
                     UpdateTitle(name);
 
-                    Stream fi;
-
+                    FileInfo fileInfo;
                     try
                     {
-                        fi = File.OpenRead(name);
+                        fileInfo = new FileInfo(name);
                     }
                     catch (IOException)
                     {
                         continue;
                     }
-                    using (fi)
-                    {
-                        byte[] hash = null;
-                        using (var ctx = new MessageDigestContext(MessageDigest.SHA512))
-                        {
-                            ctx.Init();
-                            var currentBuf = buf;
+                    string hashStr = null;
+                    var storedName = name.Substring(LongPrefix.Length);
 
-                            while (true)
+                    if (existingFiles.TryGetValue(storedName, out var entry) && entry.CreationTimeUtc == fileInfo.CreationTimeUtc && entry.ModificationTimeUtc == fileInfo.LastWriteTimeUtc && entry.Length == fileInfo.Length)
+                    {
+                        hashStr = entry.Sha512;
+                    }
+
+                    if (hashStr == null)
+                    {
+                        Stream fi;
+
+                        try
+                        {
+                            fi = File.OpenRead(name);
+                        }
+                        catch (IOException)
+                        {
+                            continue;
+                        }
+                        using (fi)
+                        {
+                            using (var ctx = new MessageDigestContext(MessageDigest.SHA512))
                             {
-                                var localRead = fi.Read(currentBuf, 0, currentBuf.Length);
-                                var nextBuf = await hashTask;
-                                if (localRead == 0)
+                                ctx.Init();
+                                var currentBuf = buf;
+
+                                while (true)
                                 {
-                                    break;
+                                    var localRead = fi.Read(currentBuf, 0, currentBuf.Length);
+                                    var nextBuf = await hashTask;
+                                    if (localRead == 0)
+                                    {
+                                        break;
+                                    }
+
+                                    var localBuf = currentBuf;
+                                    currentBuf = nextBuf;
+                                    hashTask = Task.Factory.StartNew(() =>
+                                    {
+                                        ctx.Update(localRead == localBuf.Length ? localBuf : localBuf.Take(localRead).ToArray());
+                                        bytes += localRead;
+                                        UpdateTitle(name);
+                                        return localBuf;
+                                    });
                                 }
 
-                                var localBuf = currentBuf;
-                                currentBuf = nextBuf;
-                                hashTask = Task.Factory.StartNew(() =>
-                                {
-                                    ctx.Update(localRead == localBuf.Length ? localBuf : localBuf.Take(localRead).ToArray());
-                                    bytes += localRead;
-                                    UpdateTitle(name);
-                                    return localBuf;
-                                });
+                                var hash = ctx.DigestFinal();
+                                hashStr = BitConverter.ToString(hash).Replace("-", string.Empty).ToLowerInvariant();
                             }
-
-                            hash = ctx.DigestFinal();
                         }
-
-                        var fileInfo = new FileInfo(name);
-                        serialised.Add(new Entry
-                        {
-                            Name = name.Substring(LongPrefix.Length),
-                            CreationTimeUtc = fileInfo.CreationTimeUtc,
-                            ModificationTimeUtc = fileInfo.LastWriteTimeUtc,
-                            Length = fileInfo.Length,
-                            Sha512 = BitConverter.ToString(hash).Replace("-", string.Empty).ToLowerInvariant()
-                        });
-                        ++processed;
                     }
+
+                    serialised.Add(new Entry
+                    {
+                        Name = storedName,
+                        CreationTimeUtc = fileInfo.CreationTimeUtc,
+                        ModificationTimeUtc = fileInfo.LastWriteTimeUtc,
+                        Length = fileInfo.Length,
+                        Sha512 = hashStr
+                    });
+                    ++processed;
                 }
 
                 WriteJson();
@@ -207,7 +236,7 @@ namespace FileScan
             // Divide by 1024 to get fractional value
             readable = (readable / 1024);
             // Return formatted number with suffix
-            return readable.ToString("0.### ") + suffix;
+            return readable.ToString("0.### ", CultureInfo.InvariantCulture) + suffix;
         }
     }
 }
