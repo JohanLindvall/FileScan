@@ -14,15 +14,43 @@
     {
         private const string LongPrefix = @"\\?\";
 
+        private const string FileScanJson = "FileScan.json";
+
+        private static string AddPrefix(string input)
+        {
+            if (input.StartsWith(@"\\", StringComparison.OrdinalIgnoreCase))
+            {
+                return input;
+            }
+
+            return LongPrefix + input;
+        }
+
+        private static string RemovePrefix(string input)
+        {
+            if (input.StartsWith(@LongPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                return input.Substring(LongPrefix.Length);
+            }
+
+            return input;
+        }
+
         static async Task Main(string[] args)
         {
+            if (args[0] == "-check" || args[0] == "/check")
+            {
+                Check(args.Skip(1));
+                return;
+            }
+
             foreach (var arg in args)
             {
-                var fileScanJson = LongPrefix + Path.Combine(arg, "FileScan.json");
+                var fileScanJson = AddPrefix(Path.Combine(arg, FileScanJson));
                 var serialised = new List<Entry>();
                 var directoryEntries = new Queue<string>();
                 var fileEntries = new List<string>();
-                directoryEntries.Enqueue(LongPrefix + arg);
+                directoryEntries.Enqueue(AddPrefix(arg));
                 var sw = new Stopwatch();
                 sw.Start();
                 long last = 0;
@@ -43,7 +71,7 @@
                     if (elapsed > 1000)
                     {
                         var bps = (double)(bytes - lastBytes) * 1000 / elapsed;
-                        Console.WriteLine($@"{GetBytesReadable((long)bps)}/s {GetBytesReadable(bytes)} {processed}/{fileEntries.Count - processed}/{directoryEntries.Count} {current.Substring(LongPrefix.Length)}");
+                        Console.WriteLine($@"{GetBytesReadable((long)bps)}/s {GetBytesReadable(bytes)} {processed}/{fileEntries.Count - processed}/{directoryEntries.Count} {RemovePrefix(current)}");
                         last = now;
                         lastBytes = bytes;
                     }
@@ -110,7 +138,7 @@
                         continue;
                     }
                     string hashStr = null;
-                    var storedName = name.Substring(LongPrefix.Length);
+                    var storedName = RemovePrefix(name);
 
                     if (existingFiles.TryGetValue(storedName, out var entry) && entry.CreationTimeUtc == fileInfo.CreationTimeUtc && entry.ModificationTimeUtc == fileInfo.LastWriteTimeUtc && entry.Length == fileInfo.Length)
                     {
@@ -175,6 +203,33 @@
 
                 WriteJson();
             }
+        }
+
+        private static void Check(IEnumerable<string> args)
+        {
+            var dict = new Dictionary<string, List<Entry>>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var arg in args)
+            {
+                var data = JsonConvert.DeserializeObject<Entry[]>(File.ReadAllText(arg));
+
+                foreach (var entry in data)
+                {
+                    if (!dict.TryGetValue(entry.Sha512, out var entries))
+                    {
+                        entries = new List<Entry>();
+                        dict.Add(entry.Sha512, entries);
+                    }
+
+                    entries.Add(entry);
+                }
+            }
+
+            var duplicates = dict.Values.Where(v => v.Count > 1).ToList();
+
+            duplicates.Sort((lhs, rhs) => rhs.Sum(i => i.Length).CompareTo(lhs.Sum(i => i.Length)));
+
+            File.WriteAllText("Duplicates.json", JsonConvert.SerializeObject(duplicates, Formatting.Indented));
         }
 
         public class Entry
