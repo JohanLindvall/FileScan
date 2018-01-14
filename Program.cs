@@ -211,7 +211,7 @@
 
             foreach (var arg in args)
             {
-                var data = JsonConvert.DeserializeObject<Entry[]>(File.ReadAllText(arg));
+                var data = JsonConvert.DeserializeObject<Entry[]>(File.ReadAllText(AddPrefix(Path.Combine(arg, FileScanJson))));
 
                 foreach (var entry in data)
                 {
